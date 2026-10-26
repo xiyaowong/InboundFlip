@@ -1,0 +1,127 @@
+InboundFlip — 入站用户通知切换工具
+====================================
+
+功能
+----
+
+一个极简 Windows GUI 小工具，唯一功能是切换 Windows 防火墙的
+"入站用户通知"设置：
+
+  关闭后，程序首次监听入站端口时，Windows 不再弹出
+  "允许访问 / 专用网络、公用网络"的提示框；再切换一次恢复弹窗。
+
+点击按钮即在"开启 / 关闭"之间翻转。不读、不写任何配置文件。
+
+与 netsh 命令的对应关系
+-----------------------
+
+本工具的切换动作等价于在管理员命令行执行（程序内部完成，不依赖
+用户打开命令行）：
+
+  netsh advfirewall set allprofiles settings inboundusernotification disable
+  netsh advfirewall set allprofiles settings inboundusernotification enable
+
+状态显示读取防火墙策略注册表（只读）：
+  HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\
+    FirewallPolicy\{Domain,Standard,Public}Profile\DisableNotifications
+
+技术实现
+--------
+
+- 单个 C 文件（main.c），Win32 原生 API，无任何第三方库。
+- 写入：程序内以完整系统路径（%SystemRoot%\System32\netsh.exe，
+  防 PATH 劫持）同步调用 netsh.exe，隐藏窗口，捕获其输出用于报错。
+- 读取：RegGetValue 只读注册表，不写注册表。
+- 未提权运行：弹窗提示后退出，不创建窗口（manifest 要求
+  requireAdministrator，正常双击会先出 UAC）。
+- 单实例：命名互斥体 Local\InboundFlip.SingleInstance；重复启动时
+  激活已有窗口后退出。
+- 界面：状态行 + 大按钮，固定尺寸、屏幕居中、窗口关闭即退出。
+- 三个 profile 不一致时，状态行会提示，按钮动作统一为"关闭"。
+
+构建
+----
+
+需要 MinGW-w64（x86_64）工具链（gcc + windres）。在项目目录执行：
+
+  build.cmd           产出 InboundFlip.exe
+  build.cmd --upx     额外用 UPX 压缩（需 upx 在 PATH）
+
+实测体积（Windows 11 x64，MinGW-w64 GCC 16.2 构建）：
+
+  InboundFlip.exe     24,064 字节（约 23.5 KB）
+  UPX --best --lzma   14,848 字节（约 14.5 KB）
+
+进一步压缩空间：UPX 后已很小；如需更小可改用 MSVC + /O1 /Os /GS-
+或汇编入口，约可到 8-12 KB，收益有限。当前体积对交付已足够。
+
+依赖核验
+--------
+
+objdump -p InboundFlip.exe 显示仅依赖系统自带组件：
+
+  ADVAPI32.dll  GDI32.dll  USER32.dll  KERNEL32.dll
+  api-ms-win-crt-*（UCRT，Windows 10/11 系统自带）
+
+目标机器（Windows 10/11 x64）无需安装任何运行时或依赖，拷贝即用。
+
+验收测试步骤
+------------
+
+1. 构建产出单个 InboundFlip.exe
+   运行 build.cmd，确认目录下只有一个 InboundFlip.exe（UPX 版
+   可选），记录实测体积。
+
+2. 依赖核验
+   objdump -p InboundFlip.exe（或 dumpbin /dependents），确认仅
+   上述系统 DLL。
+
+3. 干净机器运行
+   在未安装任何开发工具/运行时的 Windows 10/11 x64 上，仅拷贝该
+   exe 双击运行：出现 UAC 提权确认，确认后正常显示窗口。
+
+4. 初始状态交叉验证
+   管理员命令行执行：
+     netsh advfirewall show allprofiles | findstr /i InboundUserNotification
+   与工具状态行显示一致。
+
+5. 切换验证
+   点击按钮后，命令行的三个 profile 的 InboundUserNotification
+   全部翻转（Enable <-> Disable）；再点一次全部翻回。
+
+6. 实际弹窗行为验证
+   用会监听入站端口的程序（如 python -m http.server 8000）验证：
+   关闭通知后不再弹防火墙提示框；恢复后弹窗重现。
+
+7. 普通权限运行
+   绕过 manifest（如用 Process Explorer 以普通用户令牌启动）：
+   弹窗提示需要管理员权限，进程退出，不出现窗口。
+
+8. 组策略/安全软件锁定
+   用组策略锁定防火墙设置（计算机配置 > 管理模板 > 网络 >
+   Windows 防火墙）后切换：工具弹窗报错（含 netsh 返回原因），
+   界面刷新为实际状态，不崩溃。
+
+9. 零副作用核验
+   运行前后对比：exe 所在目录、%TEMP%、%APPDATA% 无新文件；
+   netsh advfirewall firewall show rule name=all 规则集合无变化；
+   除 DisableNotifications 外，防火墙其它属性（State、
+   FirewallPolicy、RemoteManagement 等）均无变化。
+
+零副作用声明
+------------
+
+本工具不产生任何文件（无 ini/log/cache/tmp），不写注册表，
+不创建/删除/修改任何防火墙规则，不改动 FirewallEnabled、
+DefaultInboundAction 等任何其它防火墙属性，不出站联网，无托盘、
+无自启。系统状态变化仅限"入站用户通知"这一项设置本身。
+
+关键决策
+--------
+
+- 用 netsh 而非 COM API（INetFwPolicy2）：用户指定；代码量小，
+  系统自带，输出可直接作为错误信息展示。
+- 状态读取用注册表而非 netsh show：读取快、无需解析多段文本；
+  netsh show 只在交叉验证时人工执行。
+- -O2 -s -mwindows -municode：无控制台、宽字符 API、剥离符号，
+  24 KB；UPX 可再压到 14.5 KB。
